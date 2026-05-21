@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Flashcards V1</title>
+<title>Flashcards</title>
 <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -202,7 +202,8 @@ function Header({ tab, onTabChange }) {
   return (
     <header style={s.header}>
       <div style={s.headerInner}>
-        <div style={s.logo}>Flashcards V1</div>
+        {/* Zde bylo odstraněno " V1" */}
+        <div style={s.logo}>Flashcards</div>
         <nav style={s.nav}>
           {tabs.map((t) => (
             <button key={t.id} onClick={() => onTabChange(t.id)}
@@ -244,6 +245,10 @@ function HomeTab({ onCreate, onGoToSets, hasSets }) {
     if (!parsed || parsed.length === 0) return;
     const setName = name.trim() || `Sada ${new Date().toLocaleDateString('cs-CZ')}`;
     onCreate(setName, parsed);
+    
+    // Přidán vyskakovací popup s potvrzením
+    alert(`Sada "${setName}" byla úspěšně vytvořena!`);
+    
     setName(''); setText(''); setParsed(null); setErrors([]);
     if (fileRef.current) fileRef.current.value = '';
     onGoToSets();

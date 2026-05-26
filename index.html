@@ -57,9 +57,11 @@
 <div id="root"><div class="loading">Načítání...</div></div>
 
 <script type="text/babel" data-presets="react">
-const { useState, useEffect, useRef, useCallback } = React;
+const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 const STORAGE_KEY = 'flashcard_sets_v2';
+const SETTINGS_KEY = 'flashcard_settings_v1';
+const DAILY_KEY = 'flashcard_daily_v1';
 
 // --- Jednoduché ikony jako SVG inline (místo lucide-react) ---
 const Icon = ({ children, size = 16 }) => (
@@ -124,18 +126,91 @@ function FlashcardsApp() {
   const [tab, setTab] = useState('home');
   const [sets, setSets] = useState([]);
   const [studyId, setStudyId] = useState(null);
+  const [studyDailyId, setStudyDailyId] = useState(null);
+  const [settings, setSettings] = useState({ dailyTestConfigs: [] });
+  const [dailyData, setDailyData] = useState({ date: null, sets: [] });
 
   useEffect(() => {
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) setSets(JSON.parse(raw));
+      const rawSets = localStorage.getItem(STORAGE_KEY);
+      if (rawSets) setSets(JSON.parse(rawSets));
+      const rawSettings = localStorage.getItem(SETTINGS_KEY);
+      if (rawSettings) setSettings(JSON.parse(rawSettings));
+      const rawDaily = localStorage.getItem(DAILY_KEY);
+      if (rawDaily) setDailyData(JSON.parse(rawDaily));
     } catch (e) { console.error(e); }
   }, []);
 
   useEffect(() => {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(sets)); }
+    try { 
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(sets)); 
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+      localStorage.setItem(DAILY_KEY, JSON.stringify(dailyData));
+    }
     catch (e) { console.error(e); }
-  }, [sets]);
+  }, [sets, settings, dailyData]);
+
+  // Generování denních sad
+  useEffect(() => {
+    if (sets.length === 0) return;
+    const today = new Date().toISOString().split('T')[0];
+    
+    let needsUpdate = false;
+    let newDailySets = [];
+
+    if (dailyData.date !== today) {
+      needsUpdate = true;
+    } else {
+      newDailySets = [...dailyData.sets];
+      const existingDailySetIds = newDailySets.map(ds => ds.sourceSetId);
+      const hasNewConfigs = settings.dailyTestConfigs.some(config => !existingDailySetIds.includes(config.setId));
+      if (hasNewConfigs) {
+        needsUpdate = true;
+      }
+    }
+
+    if (needsUpdate) {
+      settings.dailyTestConfigs.forEach(config => {
+        if (dailyData.date === today && newDailySets.some(ds => ds.sourceSetId === config.setId)) {
+          return; // Tuto sadu už jsme dnes vygenerovali
+        }
+
+        const mainSet = sets.find(s => s.id === config.setId);
+        if (!mainSet) return;
+        
+        let candidateCards = [];
+        if (config.mode === 'all') {
+          candidateCards = mainSet.cards.map((c, i) => ({ ...c, originalIdx: i }));
+        } else if (config.mode === 'partial_wrong') {
+          candidateCards = mainSet.cards
+            .map((c, i) => ({ ...c, originalIdx: i }))
+            .filter(c => c.status === 'partial' || c.status === 'wrong');
+        } else if (config.mode === 'only_wrong') {
+          candidateCards = mainSet.cards
+            .map((c, i) => ({ ...c, originalIdx: i }))
+            .filter(c => c.status === 'wrong');
+        }
+
+        candidateCards = candidateCards.sort(() => Math.random() - 0.5);
+        const selected = candidateCards.slice(0, config.count).map(c => ({
+          ...c, 
+          dailyStatus: 'unanswered',
+          dailyOldStatus: c.status
+        }));
+
+        if (selected.length > 0) {
+          newDailySets.push({
+            id: 'daily_' + config.setId + '_' + Date.now().toString(36),
+            sourceSetId: config.setId,
+            name: mainSet.name,
+            mode: config.mode,
+            cards: selected
+          });
+        }
+      });
+      setDailyData({ date: today, sets: newDailySets });
+    }
+  }, [sets, settings.dailyTestConfigs, dailyData.date, dailyData.sets]);
 
   const addSet = (name, cards) => {
     const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
@@ -161,6 +236,31 @@ function FlashcardsApp() {
     }));
   };
 
+  const updateDailyCardStatus = (dailySetId, dailyCardIdx, status) => {
+    let sourceSetId = null;
+    let originalIdx = null;
+
+    setDailyData((prev) => {
+      const newSets = prev.sets.map((ds) => {
+        if (ds.id !== dailySetId) return ds;
+        const newCards = ds.cards.map((c, i) => {
+          if (i === dailyCardIdx) {
+            sourceSetId = ds.sourceSetId;
+            originalIdx = c.originalIdx;
+            return { ...c, dailyStatus: status, status: status }; // Update both for consistency in daily view
+          }
+          return c;
+        });
+        return { ...ds, cards: newCards };
+      });
+      return { ...prev, sets: newSets };
+    });
+
+    if (sourceSetId !== null && originalIdx !== null) {
+      updateCardStatus(sourceSetId, originalIdx, status);
+    }
+  };
+
   const resetSet = (id) => {
     setSets((prev) => prev.map((s) => {
       if (s.id !== id) return s;
@@ -169,14 +269,28 @@ function FlashcardsApp() {
   };
 
   const studyingSet = studyId ? sets.find((s) => s.id === studyId) : null;
+  const studyingDailySet = studyDailyId ? dailyData.sets.find((s) => s.id === studyDailyId) : null;
 
   if (studyingSet) {
     return (
       <StudyView
         set={studyingSet}
+        isDaily={false}
         onExit={() => setStudyId(null)}
         onStatusChange={(idx, status) => updateCardStatus(studyingSet.id, idx, status)}
         onReset={() => resetSet(studyingSet.id)}
+      />
+    );
+  }
+
+  if (studyingDailySet) {
+    return (
+      <StudyView
+        set={studyingDailySet}
+        isDaily={true}
+        onExit={() => setStudyDailyId(null)}
+        onStatusChange={(idx, status) => updateDailyCardStatus(studyingDailySet.id, idx, status)}
+        onReset={() => {}}
       />
     );
   }
@@ -187,6 +301,8 @@ function FlashcardsApp() {
       <main style={s.main}>
         {tab === 'home' && <HomeTab onCreate={addSet} onGoToSets={() => setTab('mysets')} hasSets={sets.length > 0} />}
         {tab === 'mysets' && <MySetsTab sets={sets} onStudy={setStudyId} onDelete={deleteSet} onReset={resetSet} onCreate={() => setTab('home')} />}
+        {tab === 'daily' && <DailyTestTab dailyData={dailyData} onStudyDaily={setStudyDailyId} onGoToSettings={() => setTab('settings')} />}
+        {tab === 'settings' && <SettingsTab sets={sets} settings={settings} setSettings={setSettings} />}
         {tab === 'guide' && <GuideTab />}
       </main>
     </div>
@@ -197,6 +313,8 @@ function Header({ tab, onTabChange }) {
   const tabs = [
     { id: 'home', label: 'Domů' },
     { id: 'mysets', label: 'Moje sady' },
+    { id: 'daily', label: 'Denní testování' },
+    { id: 'settings', label: 'Nastavení' },
     { id: 'guide', label: 'Návod' },
   ];
   return (
@@ -428,9 +546,10 @@ function CardGrid({ cards, activeIdx, onJump, compact = false }) {
   );
 }
 
-function StudyView({ set, onExit, onStatusChange, onReset }) {
+function StudyView({ set, isDaily, onExit, onStatusChange, onReset }) {
   const [idx, setIdx] = useState(0);
   const [flipped, setFlipped] = useState(false);
+  const [showPopup, setShowPopup] = useState(false);
 
   useEffect(() => { setFlipped(false); }, [idx]);
 
@@ -445,10 +564,22 @@ function StudyView({ set, onExit, onStatusChange, onReset }) {
 
   const rate = useCallback((status) => {
     onStatusChange(idx, status);
+    
+    // Zkontroluj, zda je tohle poslední karta a zda jsme na všechno odpověděli
     if (idx < total - 1) {
       setTimeout(() => setIdx((i) => Math.min(i + 1, total - 1)), 150);
+    } else {
+      if (isDaily) {
+        setTimeout(() => setShowPopup(true), 300);
+      }
     }
-  }, [idx, total, onStatusChange]);
+  }, [idx, total, onStatusChange, isDaily]);
+
+  useEffect(() => {
+    if (isDaily && answered === total && total > 0 && !showPopup) {
+      setShowPopup(true);
+    }
+  }, [isDaily, answered, total, showPopup]);
 
   useEffect(() => {
     const h = (e) => {
@@ -466,6 +597,34 @@ function StudyView({ set, onExit, onStatusChange, onReset }) {
 
   return (
     <div style={s.app}>
+      {showPopup && (
+        <div style={s.popupOverlay}>
+          <div style={s.popupCard}>
+            <h2 style={s.h2}>Denní test dokončen!</h2>
+            <div style={s.popupStats}>
+              <div style={s.popupStatBox}>
+                <div style={{ fontSize: 32, fontWeight: 700, color: '#22c55e' }}>{Math.round((stats.correct / total) * 100) || 0}%</div>
+                <div style={{ color: '#9ca3af', fontSize: 13 }}>Úspěšnost (Věděl)</div>
+              </div>
+              <div style={s.popupStatBox}>
+                <div style={{ fontSize: 32, fontWeight: 700, color: '#3b82f6' }}>
+                  {set.cards.filter(c => c.dailyOldStatus !== 'correct' && c.status === 'correct').length}
+                </div>
+                <div style={{ color: '#9ca3af', fontSize: 13 }}>Opravených karet</div>
+              </div>
+            </div>
+            
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 24, textAlign: 'left' }}>
+              <div style={s.statsRow}><span style={{ ...s.statDot, background: '#22c55e' }} /><span>Věděl</span><strong style={{ color: '#22c55e' }}>{stats.correct}</strong></div>
+              <div style={s.statsRow}><span style={{ ...s.statDot, background: '#f59e0b' }} /><span>Částečně</span><strong style={{ color: '#f59e0b' }}>{stats.partial}</strong></div>
+              <div style={s.statsRow}><span style={{ ...s.statDot, background: '#ef4444' }} /><span>Nevěděl</span><strong style={{ color: '#ef4444' }}>{stats.wrong}</strong></div>
+            </div>
+
+            <button onClick={onExit} style={s.primaryBtn}>Zpět na přehled denního testování</button>
+            <button onClick={() => setShowPopup(false)} style={{ ...s.linkBtn, marginTop: 12 }}>Prohlédnout karty</button>
+          </div>
+        </div>
+      )}
       <Header tab="mysets" onTabChange={() => onExit()} />
       <main style={s.main}>
         <div style={{ maxWidth: 1100, margin: '0 auto' }}>
@@ -628,7 +787,18 @@ Co je to DML? :: Data Manipulation Language (INSERT, UPDATE, DELETE, SELECT)`;
       </div>
 
       <div style={s.card}>
-        <h2 style={s.h2}>5. Ukládání dat</h2>
+        <h2 style={s.h2}>5. Denní testování</h2>
+        <p>Pro pravidelné opakování slouží záložka <strong>Denní testování</strong>.</p>
+        <ul>
+          <li>V záložce <strong>Nastavení</strong> si vyberte sady, které chcete denně procvičovat.</li>
+          <li>Zvolte si, kolik karet chcete denně z dané sady opakovat a jaký filtr použít (např. pouze karty, které jste minule nevěděli).</li>
+          <li>Každý den se automaticky vygeneruje nová dávka karet ke zkoušení.</li>
+          <li>Vaše hodnocení z denního testování se ihned propisuje zpět do hlavní sady, takže si průběžně vylepšujete celkové statistiky a odstraňujete mezery ve znalostech.</li>
+        </ul>
+      </div>
+
+      <div style={s.card}>
+        <h2 style={s.h2}>6. Ukládání dat</h2>
         <p>Všechny sady se ukládají do <strong>localStorage</strong> v prohlížeči. To znamená:</p>
         <ul>
           <li>Data zůstanou i po zavření prohlížeče</li>
@@ -636,6 +806,171 @@ Co je to DML? :: Data Manipulation Language (INSERT, UPDATE, DELETE, SELECT)`;
           <li>Data jsou <strong>vázána na konkrétní soubor a prohlížeč</strong> — když přesunete HTML jinam nebo otevřete v jiném prohlížeči, sady tam nebudou</li>
           <li>Pokud chcete sady přenést, můžete v dev tools (F12 → Application → Local Storage) zkopírovat hodnotu klíče <code>flashcard_sets_v2</code></li>
         </ul>
+      </div>
+    </div>
+  );
+}
+
+function SettingsTab({ sets, settings, setSettings }) {
+  const [selectedSet, setSelectedSet] = useState('');
+  const [cardCount, setCardCount] = useState(10);
+  const [mode, setMode] = useState('all');
+
+  const handleAddConfig = () => {
+    if (!selectedSet) return;
+    const existing = settings.dailyTestConfigs.find(c => c.setId === selectedSet);
+    if (existing) {
+      alert('Tato sada už je v denním testování nastavená.');
+      return;
+    }
+    const maxCards = sets.find(s => s.id === selectedSet)?.cards.length || 10;
+    const finalCount = Math.min(Math.max(1, parseInt(cardCount, 10)), maxCards);
+    
+    setSettings(prev => ({
+      ...prev,
+      dailyTestConfigs: [...prev.dailyTestConfigs, { setId: selectedSet, count: finalCount, mode }]
+    }));
+    setSelectedSet('');
+  };
+
+  const handleRemoveConfig = (setId) => {
+    setSettings(prev => ({
+      ...prev,
+      dailyTestConfigs: prev.dailyTestConfigs.filter(c => c.setId !== setId)
+    }));
+  };
+
+  return (
+    <div style={s.container}>
+      <h1 style={s.h1}>Nastavení</h1>
+      <p style={s.subtitle}>Konfigurace aplikace a denního testování</p>
+
+      <div style={s.card}>
+        <h2 style={s.h2}>Přidat do Denního testování</h2>
+        <p style={{ color: '#9ca3af', marginBottom: 16, fontSize: 13 }}>
+          Vyberte sady, které se mají každý den automaticky vygenerovat k procvičení. Nastavení se projeví až další den (nepřegenerovává dnešní sady).
+        </p>
+
+        {sets.length === 0 ? (
+          <div style={{ color: '#ef4444' }}>Nejprve si musíte vytvořit nějakou sadu.</div>
+        ) : (
+          <div style={{ display: 'grid', gap: 16 }}>
+            <div>
+              <label style={s.label}>Sada</label>
+              <select value={selectedSet} onChange={(e) => setSelectedSet(e.target.value)} style={s.input}>
+                <option value="">-- Vyberte sadu --</option>
+                {sets.map(s => <option key={s.id} value={s.id}>{s.name} ({s.cards.length} karet)</option>)}
+              </select>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+              <div>
+                <label style={s.label}>Počet karet (max {selectedSet ? sets.find(s => s.id === selectedSet)?.cards.length : '?'})</label>
+                <input type="number" min="1" max={selectedSet ? sets.find(s => s.id === selectedSet)?.cards.length : 100} value={cardCount} onChange={(e) => setCardCount(e.target.value)} style={s.input} />
+              </div>
+              <div>
+                <label style={s.label}>Výběr karet</label>
+                <select value={mode} onChange={(e) => setMode(e.target.value)} style={s.input}>
+                  <option value="all">Všechny</option>
+                  <option value="partial_wrong">Částečně a Nevěděl</option>
+                  <option value="only_wrong">Pouze Nevěděl</option>
+                </select>
+              </div>
+            </div>
+            <button onClick={handleAddConfig} disabled={!selectedSet} style={{ ...s.primaryBtn, opacity: selectedSet ? 1 : 0.5 }}>Přidat sadu k testování</button>
+          </div>
+        )}
+      </div>
+
+      <h2 style={{ ...s.h2, marginTop: 32 }}>Aktivní denní testování</h2>
+      {settings.dailyTestConfigs.length === 0 ? (
+        <div style={{ color: '#9ca3af' }}>Zatím nemáte nastavené žádné sady pro denní testování.</div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {settings.dailyTestConfigs.map(c => {
+            const setName = sets.find(s => s.id === c.setId)?.name || 'Neznámá sada';
+            const modeText = c.mode === 'all' ? 'Všechny' : c.mode === 'partial_wrong' ? 'Částečně a Nevěděl' : 'Pouze Nevěděl';
+            return (
+              <div key={c.setId} style={{ ...s.setCard, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div>
+                  <h3 style={s.setName}>{setName}</h3>
+                  <div style={s.setMeta}>{c.count} karet · {modeText}</div>
+                </div>
+                <button onClick={() => handleRemoveConfig(c.setId)} style={s.iconBtn} title="Odebrat">
+                  <IconTrash size={14} />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DailyTestTab({ dailyData, onStudyDaily, onGoToSettings }) {
+  if (!dailyData.sets || dailyData.sets.length === 0) {
+    return (
+      <div style={s.container}>
+        <div style={s.emptyState}>
+          <IconPlay size={48} />
+          <h2 style={{ ...s.h2, marginTop: 16 }}>Dnešní testování prázdné</h2>
+          <p style={s.subtitle}>Nemáte nastavené sady pro denní testování, nebo se nevybraly žádné karty pro procvičení.</p>
+          <button onClick={onGoToSettings} style={{ ...s.primaryBtn, marginTop: 16, width: 'auto', padding: '12px 24px' }}>Přejít do nastavení</button>
+        </div>
+      </div>
+    );
+  }
+
+  // Funkce pro získání barvy podle úspěšnosti (semafor 0 - 100%)
+  const getColorForSuccess = (pct) => {
+    // 0% = red (0), 50% = yellow (60), 100% = green (120) - HSL
+    const hue = (pct * 120) / 100;
+    return `hsl(${hue}, 80%, 40%)`; // tmavší pastelová verze pro pozadí
+  };
+
+  return (
+    <div style={s.container}>
+      <h1 style={s.h1}>Denní testování - {new Date(dailyData.date).toLocaleDateString('cs-CZ')}</h1>
+      <p style={s.subtitle}>Vygenerováno {dailyData.sets.length} sad na dnešní den k prozkoušení.</p>
+      
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 16 }}>
+        {dailyData.sets.map((set) => {
+          const stats = countStats(set.cards);
+          const total = set.cards.length;
+          const answered = stats.correct + stats.partial + stats.wrong;
+          // úspěšnost jen ze zodpovězených karet
+          const successPct = answered > 0 ? Math.round((stats.correct / answered) * 100) : 0;
+          const completedPct = total > 0 ? Math.round((answered / total) * 100) : 0;
+          
+          const boxBg = completedPct > 0 ? getColorForSuccess(successPct) : '#1f2937';
+          const modeText = set.mode === 'all' ? 'Všechny' : set.mode === 'partial_wrong' ? 'Částečně/Nevěděl' : 'Jen Nevěděl';
+
+          return (
+            <div key={set.id} style={{ ...s.setCard, display: 'flex', flexDirection: 'column', background: boxBg, position: 'relative', overflow: 'hidden' }}>
+              <div style={{ position: 'absolute', top: 0, left: 0, height: 4, width: `${completedPct}%`, background: 'rgba(255,255,255,0.4)' }} />
+              
+              <h3 style={{ ...s.setName, fontSize: 18, marginBottom: 8, color: '#fff' }}>{set.name}</h3>
+              <div style={{ ...s.setMeta, color: 'rgba(255,255,255,0.8)', marginBottom: 16 }}>
+                {total} karet · Filtr: {modeText}
+              </div>
+              
+              <div style={{ display: 'flex', gap: 12, marginBottom: 16, flex: 1 }}>
+                <div style={{ flex: 1, background: 'rgba(0,0,0,0.2)', padding: '8px 12px', borderRadius: 8 }}>
+                  <div style={{ fontSize: 24, fontWeight: 700, color: '#fff' }}>{successPct}%</div>
+                  <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.7)', textTransform: 'uppercase' }}>Úspěšnost</div>
+                </div>
+                <div style={{ flex: 1, background: 'rgba(0,0,0,0.2)', padding: '8px 12px', borderRadius: 8 }}>
+                  <div style={{ fontSize: 24, fontWeight: 700, color: '#fff' }}>{completedPct}%</div>
+                  <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.7)', textTransform: 'uppercase' }}>Dokončeno</div>
+                </div>
+              </div>
+
+              <button onClick={() => onStudyDaily(set.id)} style={{ ...s.primaryBtn, background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.2)' }}>
+                {completedPct === 100 ? 'Testovat znovu' : 'Spustit test'}
+              </button>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -698,6 +1033,10 @@ const s = {
   statsBox: { background: '#111827', border: '1px solid #1f2937', borderRadius: 12, padding: 16 },
   statsRow: { display: 'grid', gridTemplateColumns: '16px 1fr auto', alignItems: 'center', gap: 8, fontSize: 13, color: '#d1d5db' },
   resetBtn: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6, background: '#1f2937', border: '1px solid #374151', borderRadius: 8, padding: '8px 14px', color: '#9ca3af', cursor: 'pointer', fontSize: 13 },
+  popupOverlay: { position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.8)', zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 },
+  popupCard: { background: '#111827', border: '1px solid #1f2937', borderRadius: 16, padding: 32, width: '100%', maxWidth: 400, textAlign: 'center', boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.5)' },
+  popupStats: { display: 'flex', gap: 16, justifyContent: 'center', marginBottom: 24, marginTop: 16 },
+  popupStatBox: { flex: 1, background: '#0a0a0a', border: '1px solid #1f2937', borderRadius: 12, padding: 16 },
 };
 
 // Mobile responsive

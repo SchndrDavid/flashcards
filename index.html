@@ -92,6 +92,7 @@
       </svg>
     );
     const IconUpload = (p) => <Icon {...p}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></Icon>;
+    const IconDownload = (p) => <Icon {...p}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></Icon>;
     const IconFile = (p) => <Icon {...p}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /></Icon>;
     const IconTrash = (p) => <Icon {...p}><polyline points="3 6 5 6 21 6" /><path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6" /><path d="M10 11v6" /><path d="M14 11v6" /></Icon>;
     const IconPlay = (p) => <Icon {...p}><polygon points="5 3 19 12 5 21 5 3" /></Icon>;
@@ -141,6 +142,100 @@
         else stats.unanswered++;
       });
       return stats;
+    }
+
+    // --- Export/Import utilities ---
+    function exportToCSV(sets, settings, dailyData) {
+      const esc = (val) => {
+        const str = String(val ?? '');
+        if (str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r'))
+          return '"' + str.replace(/"/g, '""') + '"';
+        return str;
+      };
+      const row = (...cells) => cells.map(esc).join(',');
+      const lines = [row('type','col1','col2','col3','col4','col5','col6','col7')];
+
+      sets.forEach(set => {
+        lines.push(row('SET', set.id, set.name, set.createdAt));
+        set.cards.forEach(card => {
+          lines.push(row('CARD', set.id, card.front, card.back, card.status || 'unanswered'));
+        });
+      });
+
+      (settings.dailyTestConfigs || []).forEach(config => {
+        lines.push(row('DAILY_CONFIG', config.setId, config.count, config.mode));
+      });
+
+      if (dailyData && dailyData.date) {
+        lines.push(row('DAILY_DATE', dailyData.date));
+        (dailyData.sets || []).forEach(ds => {
+          lines.push(row('DAILY_SET', ds.id, ds.sourceSetId, ds.name, ds.mode));
+          ds.cards.forEach(card => {
+            lines.push(row('DAILY_CARD', ds.id, card.front, card.back,
+              card.status || 'unanswered', card.dailyStatus || 'unanswered',
+              card.dailyOldStatus || 'unanswered', card.originalIdx ?? ''));
+          });
+        });
+      }
+      return lines.join('\n');
+    }
+
+    function parseCSVFull(text) {
+      const rows = [];
+      let row = [], cell = '', inQuotes = false;
+      for (let i = 0; i <= text.length; i++) {
+        const ch = text[i];
+        if (inQuotes) {
+          if (ch === '"') {
+            if (text[i + 1] === '"') { cell += '"'; i++; }
+            else inQuotes = false;
+          } else if (ch !== undefined) { cell += ch; }
+        } else {
+          if (ch === '"') { inQuotes = true; }
+          else if (ch === ',') { row.push(cell); cell = ''; }
+          else if (ch === '\r') { /* skip CR */ }
+          else if (ch === '\n' || ch === undefined) {
+            row.push(cell); cell = '';
+            rows.push(row); row = [];
+          } else { cell += ch; }
+        }
+      }
+      return rows.filter(r => r.some(c => c !== ''));
+    }
+
+    function importFromCSV(text) {
+      const rows = parseCSVFull(text);
+      if (rows.length < 2) throw new Error('Soubor je prázdný nebo neplatný.');
+      if (rows[0][0] !== 'type') throw new Error('Neplatný formát souboru (chybí hlavička).');
+
+      const sets = [], dailyTestConfigs = [], dailySets = [];
+      let dailyDate = null, currentSet = null, currentDailySet = null;
+
+      for (let i = 1; i < rows.length; i++) {
+        const [type, c1, c2, c3, c4, c5, c6, c7] = rows[i];
+        if (type === 'SET') {
+          currentSet = { id: c1, name: c2, createdAt: c3, cards: [] };
+          sets.push(currentSet);
+        } else if (type === 'CARD') {
+          if (currentSet && currentSet.id === c1)
+            currentSet.cards.push({ front: c2, back: c3, status: c4 || 'unanswered', id: `${currentSet.id}_${currentSet.cards.length}` });
+        } else if (type === 'DAILY_CONFIG') {
+          dailyTestConfigs.push({ setId: c1, count: parseInt(c2, 10), mode: c3 });
+        } else if (type === 'DAILY_DATE') {
+          dailyDate = c1;
+        } else if (type === 'DAILY_SET') {
+          currentDailySet = { id: c1, sourceSetId: c2, name: c3, mode: c4, cards: [] };
+          dailySets.push(currentDailySet);
+        } else if (type === 'DAILY_CARD') {
+          if (currentDailySet && currentDailySet.id === c1)
+            currentDailySet.cards.push({
+              front: c2, back: c3, status: c4 || 'unanswered',
+              dailyStatus: c5 || 'unanswered', dailyOldStatus: c6 || 'unanswered',
+              originalIdx: c7 !== '' && c7 !== undefined ? parseInt(c7, 10) : undefined
+            });
+        }
+      }
+      return { sets, settings: { dailyTestConfigs }, dailyData: { date: dailyDate, sets: dailySets } };
     }
 
     // --- App ---
@@ -284,6 +379,12 @@
         }
       };
 
+      const importAll = (newSets, newSettings, newDailyData) => {
+        setSets(newSets);
+        setSettings(newSettings);
+        setDailyData(newDailyData);
+      };
+
       const resetSet = (id) => {
         setSets((prev) => prev.map((s) => {
           if (s.id !== id) return s;
@@ -327,6 +428,7 @@
             {tab === 'daily' && <DailyTestTab dailyData={dailyData} onStudyDaily={setStudyDailyId} onGoToSettings={() => setTab('settings')} />}
             {tab === 'settings' && <SettingsTab sets={sets} settings={settings} setSettings={setSettings} />}
             {tab === 'guide' && <GuideTab />}
+            {tab === 'export' && <ExportImportTab sets={sets} settings={settings} dailyData={dailyData} onImportAll={importAll} />}
           </main>
         </div>
       );
@@ -339,6 +441,7 @@
         { id: 'daily', label: 'Denní testování' },
         { id: 'settings', label: 'Nastavení' },
         { id: 'guide', label: 'Návod' },
+        { id: 'export', label: 'Export/Import' },
       ];
       return (
         <header style={s.header}>
@@ -1045,6 +1148,156 @@ Co je to DML? :: Data Manipulation Language (INSERT, UPDATE, DELETE, SELECT)`;
                 </div>
               );
             })}
+          </div>
+        </div>
+      );
+    }
+
+    function ExportImportTab({ sets, settings, dailyData, onImportAll }) {
+      const [importError, setImportError] = useState(null);
+      const [importPreview, setImportPreview] = useState(null);
+      const fileRef = useRef(null);
+
+      const handleExport = () => {
+        const csv = exportToCSV(sets, settings, dailyData);
+        const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `flashcards_export_${new Date().toISOString().split('T')[0]}.csv`;
+        a.click();
+        URL.revokeObjectURL(url);
+      };
+
+      const handleImportFile = (e) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          let text = String(ev.target?.result || '');
+          if (text.startsWith('﻿')) text = text.slice(1);
+          try {
+            const preview = importFromCSV(text);
+            setImportPreview(preview);
+            setImportError(null);
+          } catch (err) {
+            setImportError(err.message);
+            setImportPreview(null);
+          }
+        };
+        reader.readAsText(file, 'UTF-8');
+      };
+
+      const handleConfirmImport = () => {
+        if (!importPreview) return;
+        const totalCards = importPreview.sets.reduce((acc, set) => acc + set.cards.length, 0);
+        if (!confirm(`Tato akce NAHRADÍ všechna stávající data:\n• ${sets.length} sad → ${importPreview.sets.length} sad\n• ${sets.reduce((a,s)=>a+s.cards.length,0)} karet → ${totalCards} karet\n\nPokračovat?`)) return;
+        onImportAll(importPreview.sets, importPreview.settings, importPreview.dailyData);
+        setImportPreview(null);
+        setImportError(null);
+        if (fileRef.current) fileRef.current.value = '';
+        alert('Import proběhl úspěšně!');
+      };
+
+      const handleCancelImport = () => {
+        setImportPreview(null);
+        setImportError(null);
+        if (fileRef.current) fileRef.current.value = '';
+      };
+
+      const totalCards = sets.reduce((acc, set) => acc + set.cards.length, 0);
+
+      return (
+        <div style={s.container}>
+          <h1 style={s.h1}>Export a Import</h1>
+          <p style={s.subtitle}>Přeneste svá data mezi zařízeními nebo si uložte zálohu.</p>
+
+          <div style={s.card}>
+            <h2 style={s.h2}>Export</h2>
+            <p style={{ color: '#9ca3af', fontSize: 13, marginBottom: 16 }}>
+              Stáhne CSV soubor se všemi sadami, denními konfiguracemi a dnešním testováním.
+              Soubor lze znovu importovat na libovolném zařízení.
+            </p>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 20 }}>
+              <div style={{ background: '#0a0a0a', border: '1px solid #1f2937', borderRadius: 8, padding: '12px 16px', textAlign: 'center' }}>
+                <div style={{ fontSize: 24, fontWeight: 700, color: '#3b82f6' }}>{sets.length}</div>
+                <div style={{ fontSize: 12, color: '#6b7280' }}>Sad</div>
+              </div>
+              <div style={{ background: '#0a0a0a', border: '1px solid #1f2937', borderRadius: 8, padding: '12px 16px', textAlign: 'center' }}>
+                <div style={{ fontSize: 24, fontWeight: 700, color: '#3b82f6' }}>{totalCards}</div>
+                <div style={{ fontSize: 12, color: '#6b7280' }}>Karet celkem</div>
+              </div>
+              <div style={{ background: '#0a0a0a', border: '1px solid #1f2937', borderRadius: 8, padding: '12px 16px', textAlign: 'center' }}>
+                <div style={{ fontSize: 24, fontWeight: 700, color: '#3b82f6' }}>{settings.dailyTestConfigs.length}</div>
+                <div style={{ fontSize: 12, color: '#6b7280' }}>Denních konfigurací</div>
+              </div>
+            </div>
+            <button
+              onClick={handleExport}
+              disabled={sets.length === 0}
+              style={{ ...s.primaryBtn, opacity: sets.length === 0 ? 0.4 : 1, cursor: sets.length === 0 ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+              <IconDownload size={16} />Stáhnout CSV export
+            </button>
+          </div>
+
+          <div style={s.card}>
+            <h2 style={s.h2}>Import</h2>
+            <p style={{ color: '#9ca3af', fontSize: 13, marginBottom: 4 }}>
+              Načte CSV soubor z exportu a obnoví všechna data.
+            </p>
+            <p style={{ color: '#f59e0b', fontSize: 13, marginBottom: 16 }}>
+              Pozor: import <strong>nahradí</strong> všechna stávající data v tomto prohlížeči.
+            </p>
+
+            {!importPreview && (
+              <>
+                <button onClick={() => fileRef.current?.click()} style={s.fileBtn}>
+                  <IconUpload />Vybrat CSV soubor
+                </button>
+                <input ref={fileRef} type="file" accept=".csv" onChange={handleImportFile} style={{ display: 'none' }} />
+              </>
+            )}
+
+            {importError && (
+              <div style={{ marginTop: 16, padding: 12, background: '#450a0a', border: '1px solid #ef4444', borderRadius: 8, color: '#ef4444', fontSize: 13 }}>
+                Chyba: {importError}
+              </div>
+            )}
+
+            {importPreview && (
+              <div style={{ marginTop: 4 }}>
+                <div style={{ padding: 16, background: '#0a2a0a', border: '1px solid #22c55e40', borderRadius: 8, marginBottom: 16 }}>
+                  <div style={{ fontSize: 13, color: '#22c55e', fontWeight: 600, marginBottom: 12 }}>Náhled importu:</div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginBottom: 12 }}>
+                    <div style={{ background: 'rgba(0,0,0,0.3)', borderRadius: 8, padding: '10px 12px', textAlign: 'center' }}>
+                      <div style={{ fontSize: 20, fontWeight: 700, color: '#fff' }}>{importPreview.sets.length}</div>
+                      <div style={{ fontSize: 12, color: '#9ca3af' }}>Sad</div>
+                    </div>
+                    <div style={{ background: 'rgba(0,0,0,0.3)', borderRadius: 8, padding: '10px 12px', textAlign: 'center' }}>
+                      <div style={{ fontSize: 20, fontWeight: 700, color: '#fff' }}>{importPreview.sets.reduce((acc, set) => acc + set.cards.length, 0)}</div>
+                      <div style={{ fontSize: 12, color: '#9ca3af' }}>Karet</div>
+                    </div>
+                    <div style={{ background: 'rgba(0,0,0,0.3)', borderRadius: 8, padding: '10px 12px', textAlign: 'center' }}>
+                      <div style={{ fontSize: 20, fontWeight: 700, color: '#fff' }}>{importPreview.settings.dailyTestConfigs.length}</div>
+                      <div style={{ fontSize: 12, color: '#9ca3af' }}>Konfigurací</div>
+                    </div>
+                  </div>
+                  {importPreview.sets.length > 0 && (
+                    <div>
+                      <div style={{ fontSize: 11, color: '#9ca3af', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Sady v souboru:</div>
+                      {importPreview.sets.slice(0, 5).map((set, i) => (
+                        <div key={i} style={{ fontSize: 13, color: '#d1d5db', padding: '2px 0' }}>• {set.name} ({set.cards.length} karet)</div>
+                      ))}
+                      {importPreview.sets.length > 5 && <div style={{ fontSize: 12, color: '#6b7280', marginTop: 4 }}>... +{importPreview.sets.length - 5} dalších</div>}
+                    </div>
+                  )}
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                  <button onClick={handleCancelImport} style={{ ...s.primaryBtn, background: '#1f2937', color: '#9ca3af' }}>Zrušit</button>
+                  <button onClick={handleConfirmImport} style={{ ...s.primaryBtn, background: '#16a34a' }}>Importovat</button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       );

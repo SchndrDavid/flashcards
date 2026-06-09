@@ -70,6 +70,27 @@
       min-height: 100vh;
       color: #9ca3af;
     }
+
+    /* Responsive nav – horizontal scroll when tabs don't fit */
+    .app-nav {
+      min-width: 0;
+    }
+    @media (max-width: 960px) {
+      .app-nav {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+        flex: 1;
+      }
+      .app-nav::-webkit-scrollbar { display: none; }
+      .app-nav button { white-space: nowrap; flex-shrink: 0; }
+    }
+
+    /* Stack 2-column grids on narrow screens */
+    @media (max-width: 560px) {
+      .resp-grid-2 { grid-template-columns: 1fr !important; }
+      .resp-grid-3 { grid-template-columns: 1fr 1fr !important; }
+    }
   </style>
 </head>
 
@@ -448,7 +469,7 @@
           <div style={s.headerInner}>
             {/* Zde bylo odstraněno " V1" */}
             <div style={s.logo}>Flashcards</div>
-            <nav style={s.nav}>
+            <nav style={s.nav} className="app-nav">
               {tabs.map((t) => (
                 <button key={t.id} onClick={() => onTabChange(t.id)}
                   style={{ ...s.navBtn, color: tab === t.id ? '#fff' : '#9ca3af', fontWeight: tab === t.id ? 600 : 400 }}>
@@ -990,7 +1011,7 @@ Co je to DML? :: Data Manipulation Language (INSERT, UPDATE, DELETE, SELECT)`;
                     {sets.map(s => <option key={s.id} value={s.id}>{s.name} ({s.cards.length} karet)</option>)}
                   </select>
                 </div>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                <div className="resp-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
                   <div>
                     <label style={s.label}>Počet karet (max {selectedSet ? sets.find(s => s.id === selectedSet)?.cards.length : '?'})</label>
                     <input type="number" min="1" max={selectedSet ? sets.find(s => s.id === selectedSet)?.cards.length : 100} value={cardCount} onChange={(e) => setCardCount(e.target.value)} style={s.input} />
@@ -1218,7 +1239,7 @@ Co je to DML? :: Data Manipulation Language (INSERT, UPDATE, DELETE, SELECT)`;
               Stáhne CSV soubor se všemi sadami, denními konfiguracemi a dnešním testováním.
               Soubor lze znovu importovat na libovolném zařízení.
             </p>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 20 }}>
+            <div className="resp-grid-3" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 20 }}>
               <div style={{ background: '#0a0a0a', border: '1px solid #1f2937', borderRadius: 8, padding: '12px 16px', textAlign: 'center' }}>
                 <div style={{ fontSize: 24, fontWeight: 700, color: '#3b82f6' }}>{sets.length}</div>
                 <div style={{ fontSize: 12, color: '#6b7280' }}>Sad</div>
@@ -1370,6 +1391,19 @@ Co je to DML? :: Data Manipulation Language (INSERT, UPDATE, DELETE, SELECT)`;
     if (window.innerWidth < 768) {
       s.studyLayout = { display: 'flex', flexDirection: 'column', gap: 16 };
       s.main = { ...s.main, padding: '16px' };
+      s.headerInner = { ...s.headerInner, padding: '10px 16px', gap: 12 };
+      s.h1 = { ...s.h1, fontSize: 22 };
+      s.card = { ...s.card, padding: 16 };
+      s.setCard = { ...s.setCard, padding: 14 };
+      s.flashcard = { ...s.flashcard, padding: '32px 18px', minHeight: 200 };
+      s.cardContent = { ...s.cardContent, fontSize: 18 };
+      s.studyTitle = { ...s.studyTitle, fontSize: 15, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '45vw' };
+      s.rateBtn = { ...s.rateBtn, padding: '14px 6px', fontSize: 12 };
+      s.popupCard = { ...s.popupCard, padding: 20 };
+    }
+
+    if (window.innerWidth >= 768 && window.innerWidth < 1024) {
+      s.studyLayout = { display: 'grid', gridTemplateColumns: '1fr 280px', gap: 20 };
     }
 
     const root = ReactDOM.createRoot(document.getElementById('root'));
